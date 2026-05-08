@@ -1,0 +1,4 @@
+{
+    "immich_url": "http://your-immich-instance:2283/api",
+    "immich_api_key": "your_api_key_here"
+}
