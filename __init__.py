@@ -4,6 +4,7 @@ from .core.immich_api import immich_api
 from .nodes.immich_nodes import NODE_CLASS_MAPPINGS as IMMICH_NCM, NODE_DISPLAY_NAME_MAPPINGS as IMMICH_NNM
 from .nodes.image_nodes import NODE_CLASS_MAPPINGS as IMAGE_NCM, NODE_DISPLAY_NAME_MAPPINGS as IMAGE_NNM
 from .nodes.save_nodes import NODE_CLASS_MAPPINGS as SAVE_NCM, NODE_DISPLAY_NAME_MAPPINGS as SAVE_NNM
+from .nodes.anima_upscaler import NODE_CLASS_MAPPINGS as ANIMA_NCM, NODE_DISPLAY_NAME_MAPPINGS as ANIMA_NNM
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -17,6 +18,9 @@ NODE_DISPLAY_NAME_MAPPINGS.update(IMAGE_NNM)
 
 NODE_CLASS_MAPPINGS.update(SAVE_NCM)
 NODE_DISPLAY_NAME_MAPPINGS.update(SAVE_NNM)
+
+NODE_CLASS_MAPPINGS.update(ANIMA_NCM)
+NODE_DISPLAY_NAME_MAPPINGS.update(ANIMA_NNM)
 
 # API Routes
 @server.PromptServer.instance.routes.get("/immich/get_albums")

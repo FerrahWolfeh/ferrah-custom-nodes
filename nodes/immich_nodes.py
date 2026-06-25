@@ -34,7 +34,7 @@ class ImmichUpload:
                 "quality": ("INT", {"default": 80, "min": 1, "max": 100}),
                 "save_locally": ("BOOLEAN", {"default": False}),
                 "add_to_album": ("BOOLEAN", {"default": False}),
-                "album_id": ("STRING", {"default": ""}),
+                "album_id": (["(none/loading)"], {"default": "(none/loading)"}),
                 "embed_metadata": ("BOOLEAN", {"default": True}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "unique_id": "UNIQUE_ID"},
@@ -45,6 +45,15 @@ class ImmichUpload:
     FUNCTION = "upload"
     OUTPUT_NODE = True
     CATEGORY = "FCN/immich"
+
+    @classmethod
+    def IS_CHANGED(s, **kwargs):
+        return float("nan")
+
+    @classmethod
+    def VALIDATE_INPUTS(s, album_id, **kwargs):
+        # Always return True to allow dynamically populated album IDs from the JS frontend
+        return True
 
     def upload(self, enabled, images, format, filename_prefix, quality, save_locally, add_to_album, album_id, embed_metadata, prompt=None, extra_pnginfo=None, unique_id=None):
         enabled_bool = is_true(enabled)
@@ -60,11 +69,16 @@ class ImmichUpload:
         if format == "JXL" and not jxl_supported:
             raise ImportError("Format selected is JXL, but 'pillow-jxl-plugin' is not installed.")
 
-        # Extração inteligente do ID do álbum (formato: "Nome (ID)")
-        if album_id and "(" in album_id and album_id.endswith(")"):
-            extracted_id = album_id.split("(")[-1].rstrip(")")
-            if len(extracted_id) > 10: # Validação simples de UUID
-                album_id = extracted_id
+        # Extração inteligente do ID do álbum (formato: "Nome (ID)") e validação
+        is_valid_album = False
+        if album_id and album_id not in ("(none/loading)", "(none)"):
+            if "(" in album_id and album_id.endswith(")"):
+                extracted_id = album_id.split("(")[-1].rstrip(")")
+                if len(extracted_id) > 10: # Validação simples de UUID
+                    album_id = extracted_id
+                    is_valid_album = True
+            elif len(album_id) > 10: # Caso seja um UUID puro
+                is_valid_album = True
 
         results = {"uploaded": [], "local": [], "errors": []}
 
@@ -123,10 +137,13 @@ class ImmichUpload:
                 asset_id = upload_result.get('id')
                 results["uploaded"].append(asset_id)
                 
-                if add_to_album_bool and album_id and asset_id:
-                    album_result = immich_api.add_to_album(album_id, asset_id)
-                    if "error" in album_result:
-                        results["errors"].append(f"Album add error: {album_result['error']}")
+                if add_to_album_bool and asset_id:
+                    if is_valid_album:
+                        album_result = immich_api.add_to_album(album_id, asset_id)
+                        if "error" in album_result:
+                            results["errors"].append(f"Album add error: {album_result['error']}")
+                    else:
+                        results["errors"].append("Album add error: No valid album selected.")
 
         return (images, json.dumps(results),)
 

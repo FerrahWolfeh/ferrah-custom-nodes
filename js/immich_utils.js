@@ -1,6 +1,101 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+// Cache for fetched albums to share across multiple nodes
+let albumsCache = null;
+let albumsPromise = null;
+
+/**
+ * Fetch albums from the Immich API with request sharing and caching.
+ */
+async function getImmichAlbums(forceRefresh = false) {
+    if (!forceRefresh && albumsCache) {
+        return albumsCache;
+    }
+    if (albumsPromise && !forceRefresh) {
+        return albumsPromise;
+    }
+
+    albumsPromise = (async () => {
+        try {
+            console.log("FerrahNodes: Fetching Immich albums...");
+            const response = await api.fetchApi("/immich/get_albums", {
+                method: "GET"
+            });
+
+            if (response.status !== 200) {
+                console.warn("ImmichUpload: Could not fetch albums. Status:", response.status);
+                return null;
+            }
+
+            const albums = await response.json();
+            if (!albums || albums.error) {
+                console.error("Immich API Error:", albums?.error);
+                return null;
+            }
+
+            albumsCache = albums;
+            return albums;
+        } catch (e) {
+            console.error("Error fetching Immich albums:", e);
+            return null;
+        } finally {
+            albumsPromise = null;
+        }
+    })();
+
+    return albumsPromise;
+}
+
+/**
+ * Refresh the album options and selections on all Immich Upload nodes in the graph.
+ */
+async function refreshAllNodes(forceRefresh = false) {
+    const albums = await getImmichAlbums(forceRefresh);
+    if (!albums) return;
+
+    const options = albums.map(a => `${a.name} (${a.id})`);
+
+    // Find all immich_upload nodes in the graph
+    if (!app.graph || typeof app.graph.findNodesByType !== "function") {
+        return;
+    }
+
+    const nodes = app.graph.findNodesByType("immich_upload");
+    for (const node of nodes) {
+        const albumIdWidget = node.widgets.find(w => w.name === "album_id");
+        if (!albumIdWidget) continue;
+
+        let finalOptions = [...options];
+        const currentValue = albumIdWidget.value;
+
+        if (currentValue && currentValue !== "(none/loading)") {
+            let hasMatch = finalOptions.includes(currentValue);
+            if (!hasMatch) {
+                // If it's a UUID, try to match it with Name (UUID) format
+                const uuidMatch = finalOptions.find(o => o.endsWith(`(${currentValue})`));
+                if (uuidMatch) {
+                    albumIdWidget.value = uuidMatch;
+                    hasMatch = true;
+                }
+            }
+            // If still no match (e.g. server config changed, or album deleted),
+            // prepend it to finalOptions so the saved state is not lost in the UI
+            if (!hasMatch) {
+                finalOptions.unshift(currentValue);
+            }
+        } else {
+            // Default to first option if no valid selection or currently loading
+            if (finalOptions.length > 0) {
+                albumIdWidget.value = finalOptions[0];
+            }
+        }
+
+        albumIdWidget.options.values = finalOptions;
+        node.setDirtyCanvas(true, true);
+    }
+}
+
 /**
  * Extension for the immich_upload node that fetches albums dynamically.
  */
@@ -8,67 +103,50 @@ app.registerExtension({
     name: "Ferrah.ImmichUpload",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (nodeData.name === "immich_upload") {
-            
+
             const onNodeCreated = nodeType.prototype.onNodeCreated;
-            nodeType.prototype.onNodeCreated = function() {
+            nodeType.prototype.onNodeCreated = function () {
                 const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
-                
+
                 const node = this;
                 const albumIdWidget = node.widgets.find(w => w.name === "album_id");
-                
+
                 if (!albumIdWidget) return r;
 
-                // Function to fetch albums and update the widget to a combo box
-                const fetchAlbums = async () => {
-                    try {
-                        // The backend uses config.json for credentials
-                        const response = await api.fetchApi("/immich/get_albums", {
-                            method: "GET"
-                        });
-                        
-                        if (response.status !== 200) {
-                            console.warn("ImmichUpload: Could not fetch albums. Check your config.json.");
-                            return;
-                        }
-                        
-                        const albums = await response.json();
-                        if (!albums || albums.error) {
-                            console.error("Immich API Error:", albums?.error);
-                            return;
-                        }
-
-                        // Prepare options in "Name (ID)" format
-                        const options = albums.map(a => `${a.name} (${a.id})`);
-                        
-                        // Convert widget from STRING to COMBO dynamically
-                        albumIdWidget.type = "combo";
-                        if (!albumIdWidget.options) albumIdWidget.options = {};
-                        albumIdWidget.options.values = options;
-                        
-                        // Try to keep the current value if it's valid
-                        if (albumIdWidget.value && !options.includes(albumIdWidget.value)) {
-                            const match = options.find(o => o.endsWith(`(${albumIdWidget.value})`));
-                            if (match) {
-                                albumIdWidget.value = match;
+                // Intercept the widget's value using a getter/setter.
+                // This ensures that when ComfyUI deserializes the workflow and assigns the value
+                // (before options are fetched), the value is preserved in options.values.
+                let widgetValue = albumIdWidget.value;
+                Object.defineProperty(albumIdWidget, "value", {
+                    set(v) {
+                        widgetValue = v;
+                        if (v && v !== "(none/loading)") {
+                            if (!albumIdWidget.options.values.includes(v)) {
+                                albumIdWidget.options.values = [v];
                             }
                         }
-                        
-                        node.setDirtyCanvas(true, true);
-                    } catch (e) {
-                        console.error("Error fetching Immich albums:", e);
-                    }
-                };
+                    },
+                    get() {
+                        return widgetValue;
+                    },
+                    configurable: true,
+                    enumerable: true
+                });
 
-                // Initial fetch
-                setTimeout(fetchAlbums, 1000);
-                
+                // Fetch and update all nodes on load
+                setTimeout(() => {
+                    refreshAllNodes(false).catch(err => console.error("Error refreshing Immich nodes:", err));
+                }, 1000);
+
                 // Add Refresh option to context menu
                 const onGetExtraMenuOptions = node.getExtraMenuOptions;
-                node.getExtraMenuOptions = function(_, options) {
+                node.getExtraMenuOptions = function (_, options) {
                     if (onGetExtraMenuOptions) onGetExtraMenuOptions.apply(this, arguments);
                     options.push({
                         content: "↻ Refresh Immich Albums",
-                        callback: () => fetchAlbums()
+                        callback: () => {
+                            refreshAllNodes(true).catch(err => console.error("Error refreshing Immich nodes:", err));
+                        }
                     });
                 };
 
@@ -77,3 +155,4 @@ app.registerExtension({
         }
     }
 });
+
