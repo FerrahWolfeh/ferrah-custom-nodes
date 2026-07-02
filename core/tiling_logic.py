@@ -16,7 +16,13 @@ from .tiled_utils import (
     patch_anima_rope, sample_tile, get_vae_spatial_compression, 
     get_model_patch_spatial, get_pixel_alignment, crop_noise_for_tile
 )
-
+def calculate_tile_denoise(var, ref_var, base_denoise, dynamic_denoise=False, min_denoise=0.10):
+    if not dynamic_denoise:
+        return base_denoise
+    denom = max(ref_var, 0.005)
+    detail_factor = min(1.0, var / denom)
+    actual_min_denoise = min(min_denoise, base_denoise)
+    return actual_min_denoise + (base_denoise - actual_min_denoise) * detail_factor
 
 
 def calculate_tiling_grid(
@@ -26,6 +32,7 @@ def calculate_tiling_grid(
     detail_percentile=0.85,
     target_w=None, target_h=None, scale_factor=None
 ):
+    adaptive_tiling = False  # Deprecated, force disabled to prevent quality mismatch / blurry patches
     batch_size = image.shape[0]
     batch_configs = []
 
@@ -119,7 +126,7 @@ def calculate_tiling_grid(
                 
                 var = get_region_variance(x1, y1, x2, y2)
                 
-                if var <= 0.0001:
+                if var <= 0.0001 and False: # Keep low-variance blocks to prevent undenoised holes in the canvas
                     return None
                 
                 should_split = False
@@ -130,7 +137,7 @@ def calculate_tiling_grid(
                     elif depth == 1 and var > roi_threshold:
                         should_split = True
                             
-                    if w >= target_tile_size * (2 ** (max_depth - depth - 1)) or h >= target_tile_size * (2 ** (max_depth - depth - 1)):
+                    if w > target_tile_size or h > target_tile_size:
                         should_split = True
                 
                 node = {
@@ -313,11 +320,15 @@ def draw_tiling_preview_image(
     target_tile_size: int = 1024,
     pixel_align: int = 16,
     draw_tiles: bool = True,
-    draw_padding: bool = False
+    draw_padding: bool = False,
+    denoise: float = None,
+    dynamic_denoise: bool = False,
+    min_denoise: float = 0.10
 ) -> torch.Tensor:
     """
     Generate preview images with overlays representing the tiling layout.
     """
+    adaptive_tiling = False  # Deprecated, force disabled
     def get_leaves(node):
         if node["is_leaf"]:
             yield node
@@ -441,7 +452,14 @@ def draw_tiling_preview_image(
                 if is_skipped:
                     badge_text += " [SKIP]"
                 else:
-                    badge_text += f" (v:{var:.4f})"
+                    if denoise is not None:
+                        actual_denoise = calculate_tile_denoise(
+                            var, ref_var, denoise,
+                            dynamic_denoise=dynamic_denoise, min_denoise=min_denoise
+                        )
+                        badge_text += f" (v:{var:.4f}, d:{actual_denoise:.2f})"
+                    else:
+                        badge_text += f" (v:{var:.4f})"
                     
                 # Measure text size
                 try:
@@ -489,8 +507,10 @@ def execute_tiled_sampling_loop(
     vae_spatial, patch_spatial, pixel_align,
     seed, steps, cfg, sampler_name, scheduler, denoise,
     batch_configs, padding, mask_blur, adaptive_tiling,
-    target_tile_size, tile_size_mode
+    target_tile_size, tile_size_mode,
+    dynamic_denoise=False, min_denoise=0.10
 ):
+    adaptive_tiling = False  # Deprecated, force disabled to prevent quality mismatch / blurry patches
     batch_size = latent_b_batch.shape[0]
     final_batch_outputs = []
 
@@ -510,7 +530,10 @@ def execute_tiled_sampling_loop(
         
         def count_expected_steps(node):
             if node["is_leaf"]:
-                actual_denoise = denoise
+                actual_denoise = calculate_tile_denoise(
+                    node["var"], ref_var, denoise,
+                    dynamic_denoise=dynamic_denoise, min_denoise=min_denoise
+                )
                 if adaptive_tiling and tile_size_mode == "Adaptive (Quadtree)":
                     var_ratio, abs_var = node["var"] / ref_var, node["var"] if (ref_var is not None and ref_var > 1e-8) else 1.0
                     if abs_var < 0.002 or var_ratio < 0.15:
@@ -545,21 +568,23 @@ def execute_tiled_sampling_loop(
             ref_var = config["ref_var"]
             total_base_blocks = len(base_blocks)
             
+            total_leaf_tiles = sum(sum(1 for _ in get_leaves(block)) for block in base_blocks)
+            leaf_idx = 0
+            
             img_b = image[b:b+1]  # (1, H, W, C)
             b_w, b_h = img_b.shape[2], img_b.shape[1]
-
+ 
             canvas_w, canvas_h = target_w, target_h
             print(f"[ANIMA] Target Canvas: {canvas_w}x{canvas_h}")
-
-            raw_latent_2x = latent_b_batch[b:b+1].clone()
-            latent_b = raw_latent_2x.clone()
-
+ 
+            latent_b = latent_b_batch[b:b+1].clone()
+ 
             noise_divisor = vae_spatial
-            global_noise_2x = comfy.sample.prepare_noise(raw_latent_2x, seed, None)
-
+            global_noise = comfy.sample.prepare_noise(latent_b, seed, None)
+ 
             # Recursive processing of tile nodes in latent space
             def process_tile_node(node, parent_node=None, child_idx=0, base_idx=0, base_block_state=None):
-                nonlocal latent_b, pos_embedder_to_restore, orig_pos_embedder_forward, completed_steps
+                nonlocal latent_b, pos_embedder_to_restore, orig_pos_embedder_forward, completed_steps, leaf_idx
                 
                 x1, y1, actual_tw, actual_th, depth = node["x1"], node["y1"], node["w"], node["h"], node["depth"]
                 
@@ -570,7 +595,11 @@ def execute_tiled_sampling_loop(
                         print(f"[ANIMA] 📦 Processing Base Tile {base_idx+1}/{total_base_blocks} | Core: ({x1},{y1}) {actual_tw}x{actual_th} | Split into {leaves_count} sub-tiles")
                 
                 if node["is_leaf"]:
-                    actual_denoise = denoise
+                    leaf_idx += 1
+                    actual_denoise = calculate_tile_denoise(
+                        node["var"], ref_var, denoise,
+                        dynamic_denoise=dynamic_denoise, min_denoise=min_denoise
+                    )
                     if adaptive_tiling and tile_size_mode == "Adaptive (Quadtree)":
                         var_ratio, abs_var = node["var"] / ref_var, node["var"] if (ref_var is not None and ref_var > 1e-8) else 1.0
                         if abs_var < 0.002 or var_ratio < 0.15:
@@ -584,14 +613,14 @@ def execute_tiled_sampling_loop(
                             base_block_state["sub_idx"] += 1
                             prefix = "└──" if sub_idx == leaves_count - 1 else "├──"
                             if leaves_count > 1:
-                                print(f"[ANIMA]   {prefix} Sub-tile {sub_idx+1}/{leaves_count} | Skipped (low variance: {abs_var:.6f}, ratio: {var_ratio:.4f})")
+                                print(f"[ANIMA]   {prefix} Sub-tile {sub_idx+1}/{leaves_count} [Tile {leaf_idx}/{total_leaf_tiles}] | Skipped (low variance: {abs_var:.6f}, ratio: {var_ratio:.4f})")
                             else:
-                                print(f"[ANIMA] 📦 Processing Base Tile {base_idx+1}/{total_base_blocks} (No Split) | Skipped (low variance: {abs_var:.6f}, ratio: {var_ratio:.4f})")
+                                print(f"[ANIMA] 📦 Processing Base Tile {base_idx+1}/{total_base_blocks} (No Split) [Tile {leaf_idx}/{total_leaf_tiles}] | Skipped (low variance: {abs_var:.6f}, ratio: {var_ratio:.4f})")
                             return
                         
                         if var_ratio < 0.5:
                             actual_denoise = denoise * (0.5 + 0.5 * var_ratio)
-
+ 
                     # Determine the coordinates in latent space
                     lx1_dst = x1 // noise_divisor
                     ly1_dst = y1 // noise_divisor
@@ -627,25 +656,25 @@ def execute_tiled_sampling_loop(
                     crop_region_2x = (c_x1_2x, c_y1_2x, c_x2_2x, c_y2_2x)
                     real_w_2x = c_x2_2x - c_x1_2x
                     real_h_2x = c_y2_2x - c_y1_2x
-
-                    # Exclusive Latent Slicing: Crop directly from raw_latent_2x instead of VAE encoding pixels
-                    if raw_latent_2x.ndim == 5:
-                        cropped_latent = raw_latent_2x[:, :, :, crop_region_2x[1] // noise_divisor:crop_region_2x[3] // noise_divisor, crop_region_2x[0] // noise_divisor:crop_region_2x[2] // noise_divisor].clone()
+ 
+                    # Exclusive Latent Slicing: Crop directly from latent_b instead of raw_latent_2x
+                    if latent_b.ndim == 5:
+                        cropped_latent = latent_b[:, :, :, crop_region_2x[1] // noise_divisor:crop_region_2x[3] // noise_divisor, crop_region_2x[0] // noise_divisor:crop_region_2x[2] // noise_divisor].clone()
                     else:
-                        cropped_latent = raw_latent_2x[:, :, crop_region_2x[1] // noise_divisor:crop_region_2x[3] // noise_divisor, crop_region_2x[0] // noise_divisor:crop_region_2x[2] // noise_divisor].clone()
-
+                        cropped_latent = latent_b[:, :, crop_region_2x[1] // noise_divisor:crop_region_2x[3] // noise_divisor, crop_region_2x[0] // noise_divisor:crop_region_2x[2] // noise_divisor].clone()
+ 
                     if tile_h_lat <= 0 or tile_w_lat <= 0:
                         tile_steps = max(1, int(steps * actual_denoise))
                         completed_steps += tile_steps
                         pbar.update_absolute(completed_steps)
                         return
-
+ 
                     # Slice global noise using the utility function
                     tile_noise = crop_noise_for_tile(
-                        global_noise_2x, crop_region_2x, noise_divisor,
+                        global_noise, crop_region_2x, noise_divisor,
                         target_size=(cropped_latent.shape[-1], cropped_latent.shape[-2])
                     )
-
+ 
                     # Print structured hierarchical log
                     if tile_size_mode == "Adaptive (Quadtree)":
                         sub_idx = base_block_state["sub_idx"]
@@ -653,50 +682,53 @@ def execute_tiled_sampling_loop(
                         base_block_state["sub_idx"] += 1
                         prefix = "└──" if sub_idx == leaves_count - 1 else "├──"
                         if leaves_count > 1:
-                            print(f"[ANIMA]   {prefix} Sub-tile {sub_idx+1}/{leaves_count} | Core: ({x1},{y1}) {actual_tw}x{actual_th} -> Padding: {real_w_2x}x{real_h_2x} | Denoise: {actual_denoise:.4f}")
+                            print(f"[ANIMA]   {prefix} Sub-tile {sub_idx+1}/{leaves_count} [Tile {leaf_idx}/{total_leaf_tiles}] | Core: ({x1},{y1}) {actual_tw}x{actual_th} -> Padding: {real_w_2x}x{real_h_2x} | Denoise: {actual_denoise:.4f}")
+                            steps_prefix = "[ANIMA]       └── " if sub_idx == leaves_count - 1 else "[ANIMA]   │   └── "
                         else:
-                            print(f"[ANIMA] 📦 Processing Base Tile {base_idx+1}/{total_base_blocks} (No Split) | Core: ({x1},{y1}) {actual_tw}x{actual_th} -> Padding: {real_w_2x}x{real_h_2x} | Denoise: {actual_denoise:.4f}")
+                            print(f"[ANIMA] 📦 Processing Base Tile {base_idx+1}/{total_base_blocks} (No Split) [Tile {leaf_idx}/{total_leaf_tiles}] | Core: ({x1},{y1}) {actual_tw}x{actual_th} -> Padding: {real_w_2x}x{real_h_2x} | Denoise: {actual_denoise:.4f}")
+                            steps_prefix = "[ANIMA]   └── "
                     else:
-                        print(f"[ANIMA] 📦 Processing Tile {base_idx+1}/{total_base_blocks} | Core: ({x1},{y1}) {actual_tw}x{actual_th} -> Padding: {real_w_2x}x{real_h_2x} | Denoise: {actual_denoise:.4f}")
-
+                        print(f"[ANIMA] 📦 Processing Tile {base_idx+1}/{total_base_blocks} [Tile {leaf_idx}/{total_leaf_tiles}] | Core: ({x1},{y1}) {actual_tw}x{actual_th} -> Padding: {real_w_2x}x{real_h_2x} | Denoise: {actual_denoise:.4f}")
+                        steps_prefix = "[ANIMA]   └── "
+ 
                     lx1_src = max(0, x1 // noise_divisor - crop_region_2x[0] // noise_divisor)
                     ly1_src = max(0, y1 // noise_divisor - crop_region_2x[1] // noise_divisor)
-
+ 
                     # Create latent blend mask for composition and noise masking
                     lblend = max(1, mask_blur // noise_divisor) if mask_blur > 0 else 0
                     l_core_x1 = lx1_src
                     l_core_y1 = ly1_src
                     l_core_x2 = lx1_src + tile_w_lat
                     l_core_y2 = ly1_src + tile_h_lat
-
+ 
                     latent_blend_mask = create_latent_blend_mask(
                         cropped_latent.shape[-2], cropped_latent.shape[-1], 
                         l_core_x1, l_core_y1, l_core_x2, l_core_y2, 
                         lblend, device=cropped_latent.device
                     )
-
+ 
                     cropped_pos = crop_cond(positive, crop_region_2x, (b_w, b_h), (canvas_w, canvas_h), (real_w_2x, real_h_2x), divisor=noise_divisor)
                     cropped_neg = crop_cond(negative, crop_region_2x, (b_w, b_h), (canvas_w, canvas_h), (real_w_2x, real_h_2x), divisor=noise_divisor)
-
+ 
                     latent = {
                         "samples": cropped_latent,
                         "noise_mask": latent_blend_mask.unsqueeze(0)
                     }
-
+ 
                     try: dm = model.model.diffusion_model
                     except AttributeError: dm = None
-
+ 
                     if dm is not None and hasattr(dm, "pos_embedder"):
                         pos_embedder_to_restore = dm.pos_embedder
                         shift_x, shift_y = (crop_region_2x[0] // noise_divisor) // patch_spatial, (crop_region_2x[1] // noise_divisor) // patch_spatial
                         orig_pos_embedder_forward = patch_anima_rope(dm.pos_embedder, shift_x, shift_y)
                     else:
                         orig_pos_embedder_forward = None
-
+ 
                     # Progress indicators
                     completed_steps_at_start = completed_steps
                     last_step_seen = -1
-
+ 
                     def sampler_callback(step, x0, x, total_steps):
                         nonlocal completed_steps, last_step_seen
                         if step != last_step_seen:
@@ -713,8 +745,8 @@ def execute_tiled_sampling_loop(
                             bar_length = 20
                             filled_length = int(bar_length * current_step // total_steps)
                             bar = "█" * filled_length + "░" * (bar_length - filled_length)
-                            print(f"\r[ANIMA]   └── Sampling Steps: [{bar}] {pct}% ({current_step}/{total_steps})", end="", flush=True)
-
+                            print(f"\r{steps_prefix}Sampling Steps: [{bar}] {pct}% ({current_step}/{total_steps})", end="", flush=True)
+ 
                     try:
                         # Pass sliced noise and step callback directly to sample_tile
                         sampled = sample_tile(
@@ -739,7 +771,7 @@ def execute_tiled_sampling_loop(
                         
                         if actual_steps_run > 0:
                             bar = "█" * 20
-                            print(f"\r[ANIMA]   └── Sampling Steps: [{bar}] 100% ({actual_steps_run}/{actual_steps_run})", flush=True)
+                            print(f"\r{steps_prefix}Sampling Steps: [{bar}] 100% ({actual_steps_run}/{actual_steps_run})", flush=True)
 
                     sampled_samples = sampled["samples"]
 
@@ -782,7 +814,7 @@ def execute_tiled_sampling_loop(
 
             final_batch_outputs.append(latent_b)
 
-            del raw_latent_2x, global_noise_2x, latent_b
+            del global_noise, latent_b
             gc.collect()
             comfy.model_management.soft_empty_cache()
 
@@ -801,7 +833,9 @@ def execute_tiled_sampling(
     tiling_strategy, tile_size_mode, target_tile_size, min_tile_size,
     tile_width, tile_height, padding, mask_blur, adaptive_tiling,
     detail_percentile=0.85,
-    scale_factor=None
+    scale_factor=None,
+    dynamic_denoise=False,
+    min_denoise=0.10
 ):
     # 1. Calculate the grid configs for the batch
     batch_configs = calculate_tiling_grid(
@@ -845,5 +879,7 @@ def execute_tiled_sampling(
         mask_blur=mask_blur,
         adaptive_tiling=adaptive_tiling,
         target_tile_size=target_tile_size,
-        tile_size_mode=tile_size_mode
+        tile_size_mode=tile_size_mode,
+        dynamic_denoise=dynamic_denoise,
+        min_denoise=min_denoise
     )

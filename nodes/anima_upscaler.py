@@ -101,6 +101,14 @@ class AnimaTiledUpscalerNode:
                     "default": "bislerp",
                     "tooltip": "The interpolation method used to scale latent variables. 'bislerp' or 'area' is highly recommended to avoid ringing/squiggly lines near sharp edges."
                 }),
+                "dynamic_denoise": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Dynamically scales down the denoise value for tiles with less detail to prevent hallucinating extra details in flat/empty areas."
+                }),
+                "min_denoise": ("FLOAT", {
+                    "default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "The minimum denoise value for low-detail tiles when dynamic denoise is enabled."
+                }),
             }
         }
 
@@ -111,7 +119,8 @@ class AnimaTiledUpscalerNode:
     def upscale(self, model, positive, negative, vae, image, upscale_model,
                 seed, steps, cfg, sampler_name, scheduler, denoise, scale_factor, max_upscale_scale,
                 tiling_strategy, tile_size_mode, target_tile_size, min_tile_size, tile_width, tile_height, padding,
-                mask_blur, adaptive_tiling, detail_percentile, latent_upscale_method):
+                mask_blur, adaptive_tiling, detail_percentile, latent_upscale_method,
+                dynamic_denoise=False, min_denoise=0.10):
 
         vae_encoder = VAEEncode()
         upscaler_node = upscale_nodes.ImageUpscaleWithModel()
@@ -178,7 +187,9 @@ class AnimaTiledUpscalerNode:
             mask_blur=mask_blur,
             adaptive_tiling=adaptive_tiling,
             detail_percentile=detail_percentile,
-            scale_factor=scale_factor
+            scale_factor=scale_factor,
+            dynamic_denoise=dynamic_denoise,
+            min_denoise=min_denoise
         )
 
         return (sampled_dict,)
@@ -242,6 +253,14 @@ class AnimaTiledSamplerNode:
                     "default": 0.85, "min": 0.00, "max": 1.00, "step": 0.01,
                     "tooltip": "The quantile threshold for detail selection. A value of 0.85 means the top 15% of high frequency details are analyzed for splits (Adaptive mode) or kept (for filtering). Lower values include more of the image (less detailed areas)."
                 }),
+                "dynamic_denoise": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Dynamically scales down the denoise value for tiles with less detail to prevent hallucinating extra details in flat/empty areas."
+                }),
+                "min_denoise": ("FLOAT", {
+                    "default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "The minimum denoise value for low-detail tiles when dynamic denoise is enabled."
+                }),
             },
             "optional": {
                 "vae":           ("VAE",),
@@ -255,7 +274,8 @@ class AnimaTiledSamplerNode:
     def sample(self, model, positive, negative, latent, image,
                seed, steps, cfg, sampler_name, scheduler, denoise,
                tiling_strategy, tile_size_mode, target_tile_size, min_tile_size, tile_width, tile_height, padding,
-               mask_blur, adaptive_tiling, detail_percentile, vae=None):
+               mask_blur, adaptive_tiling, detail_percentile, vae=None,
+               dynamic_denoise=False, min_denoise=0.10):
 
         vae_spatial = get_vae_spatial_compression(vae) if vae is not None else 8
         patch_spatial = get_model_patch_spatial(model)
@@ -291,7 +311,9 @@ class AnimaTiledSamplerNode:
             mask_blur=mask_blur,
             adaptive_tiling=adaptive_tiling,
             detail_percentile=detail_percentile,
-            scale_factor=None
+            scale_factor=None,
+            dynamic_denoise=dynamic_denoise,
+            min_denoise=min_denoise
         )
 
         return (sampled_dict,)
@@ -425,6 +447,11 @@ class AnimaTilePreviewNode:
                 "tiles": ("ANIMA_TILES",),
                 "show_tiles": ("BOOLEAN", {"default": True}),
                 "show_padding": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "denoise": ("FLOAT", {"default": 0.40, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "dynamic_denoise": ("BOOLEAN", {"default": False}),
+                "min_denoise": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01}),
             }
         }
 
@@ -433,7 +460,7 @@ class AnimaTilePreviewNode:
     OUTPUT_NODE = True
     CATEGORY = "FCN/sampling"
 
-    def preview(self, image, tiles, show_tiles, show_padding):
+    def preview(self, image, tiles, show_tiles, show_padding, denoise=None, dynamic_denoise=None, min_denoise=None):
         import folder_paths
         import uuid
         import os
@@ -457,7 +484,10 @@ class AnimaTilePreviewNode:
             target_tile_size=target_tile_size,
             pixel_align=pixel_align,
             draw_tiles=show_tiles,
-            draw_padding=show_padding
+            draw_padding=show_padding,
+            denoise=denoise,
+            dynamic_denoise=dynamic_denoise if dynamic_denoise is not None else False,
+            min_denoise=min_denoise if min_denoise is not None else 0.10
         )
         
         temp_dir = folder_paths.get_temp_directory()
@@ -503,6 +533,14 @@ class AnimaTiledSamplerFromTilesNode:
                 "sampler_name":  (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler":     (comfy.samplers.KSampler.SCHEDULERS,),
                 "denoise":       ("FLOAT",  {"default": 0.40, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "dynamic_denoise": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Dynamically scales down the denoise value for tiles with less detail to prevent hallucinating extra details in flat/empty areas."
+                }),
+                "min_denoise": ("FLOAT", {
+                    "default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "The minimum denoise value for low-detail tiles when dynamic denoise is enabled."
+                }),
             },
             "optional": {
                 "vae":           ("VAE",),
@@ -514,7 +552,8 @@ class AnimaTiledSamplerFromTilesNode:
     CATEGORY = "FCN/sampling"
 
     def sample(self, model, positive, negative, latent, tiles,
-               seed, steps, cfg, sampler_name, scheduler, denoise, vae=None):
+               seed, steps, cfg, sampler_name, scheduler, denoise, vae=None,
+               dynamic_denoise=False, min_denoise=0.10):
 
         # Extract tiling settings from the struct
         batch_configs = tiles["batch_configs"]
@@ -561,7 +600,9 @@ class AnimaTiledSamplerFromTilesNode:
             mask_blur=mask_blur,
             adaptive_tiling=adaptive_tiling,
             target_tile_size=target_tile_size,
-            tile_size_mode=tile_size_mode
+            tile_size_mode=tile_size_mode,
+            dynamic_denoise=dynamic_denoise,
+            min_denoise=min_denoise
         )
 
         return (sampled_dict,)
