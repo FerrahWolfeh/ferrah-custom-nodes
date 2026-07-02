@@ -54,28 +54,33 @@ async function refreshAllNodes(forceRefresh = false) {
     const albums = await getImmichAlbums(forceRefresh);
     if (!albums) return;
 
-    const options = albums.map(a => `${a.name} (${a.id})`);
+    // Add "(none)" to the options list
+    const options = ["(none)", ...albums.map(a => `${a.name} (${a.id})`)];
 
-    // Find all immich_upload nodes in the graph
+    // Find all immich_upload and immich_album nodes in the graph
     if (!app.graph || typeof app.graph.findNodesByType !== "function") {
         return;
     }
 
-    const nodes = app.graph.findNodesByType("immich_upload");
+    const uploadNodes = app.graph.findNodesByType("immich_upload") || [];
+    const albumNodes = app.graph.findNodesByType("immich_album") || [];
+    const nodes = [...uploadNodes, ...albumNodes];
+
     for (const node of nodes) {
         const albumIdWidget = node.widgets.find(w => w.name === "album_id");
         if (!albumIdWidget) continue;
 
         let finalOptions = [...options];
         const currentValue = albumIdWidget.value;
+        let resolvedValue = currentValue;
 
-        if (currentValue && currentValue !== "(none/loading)") {
+        if (currentValue && currentValue !== "(none/loading)" && currentValue !== "(none)") {
             let hasMatch = finalOptions.includes(currentValue);
             if (!hasMatch) {
                 // If it's a UUID, try to match it with Name (UUID) format
                 const uuidMatch = finalOptions.find(o => o.endsWith(`(${currentValue})`));
                 if (uuidMatch) {
-                    albumIdWidget.value = uuidMatch;
+                    resolvedValue = uuidMatch;
                     hasMatch = true;
                 }
             }
@@ -85,24 +90,35 @@ async function refreshAllNodes(forceRefresh = false) {
                 finalOptions.unshift(currentValue);
             }
         } else {
-            // Default to first option if no valid selection or currently loading
-            if (finalOptions.length > 0) {
-                albumIdWidget.value = finalOptions[0];
+            // Default to "(none)" if no valid selection, currently loading, or set to "(none)"
+            if (finalOptions.includes("(none)")) {
+                resolvedValue = "(none)";
+            } else if (finalOptions.length > 0) {
+                resolvedValue = finalOptions[0];
             }
         }
 
+        // Clean up the custom getter/setter on value defined during node creation.
+        // This restores default value assignment and display behavior.
+        try {
+            delete albumIdWidget.value;
+        } catch (e) {
+            console.warn("Could not delete custom getter/setter on albumIdWidget value:", e);
+        }
+
+        albumIdWidget.value = resolvedValue;
         albumIdWidget.options.values = finalOptions;
         node.setDirtyCanvas(true, true);
     }
 }
 
 /**
- * Extension for the immich_upload node that fetches albums dynamically.
+ * Extension for the immich_upload and immich_album nodes that fetches albums dynamically.
  */
 app.registerExtension({
     name: "Ferrah.ImmichUpload",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name === "immich_upload") {
+        if (nodeData.name === "immich_upload" || nodeData.name === "immich_album") {
 
             const onNodeCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
@@ -120,7 +136,7 @@ app.registerExtension({
                 Object.defineProperty(albumIdWidget, "value", {
                     set(v) {
                         widgetValue = v;
-                        if (v && v !== "(none/loading)") {
+                        if (v && v !== "(none/loading)" && v !== "(none)") {
                             if (!albumIdWidget.options.values.includes(v)) {
                                 albumIdWidget.options.values = [v];
                             }

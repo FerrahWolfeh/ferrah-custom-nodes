@@ -37,6 +37,9 @@ class ImmichUpload:
                 "album_id": (["(none/loading)"], {"default": "(none/loading)"}),
                 "embed_metadata": ("BOOLEAN", {"default": True}),
             },
+            "optional": {
+                "extra_albums": ("IMMICH_ALBUMS",),
+            },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "unique_id": "UNIQUE_ID"},
         }
 
@@ -55,7 +58,7 @@ class ImmichUpload:
         # Always return True to allow dynamically populated album IDs from the JS frontend
         return True
 
-    def upload(self, enabled, images, format, filename_prefix, quality, save_locally, add_to_album, album_id, embed_metadata, prompt=None, extra_pnginfo=None, unique_id=None):
+    def upload(self, enabled, images, format, filename_prefix, quality, save_locally, add_to_album, album_id, embed_metadata, prompt=None, extra_pnginfo=None, unique_id=None, extra_albums=None):
         enabled_bool = is_true(enabled)
         add_to_album_bool = is_true(add_to_album)
         save_locally_bool = is_true(save_locally)
@@ -69,16 +72,27 @@ class ImmichUpload:
         if format == "JXL" and not jxl_supported:
             raise ImportError("Format selected is JXL, but 'pillow-jxl-plugin' is not installed.")
 
-        # Extração inteligente do ID do álbum (formato: "Nome (ID)") e validação
-        is_valid_album = False
+        # Gather and validate all album IDs (from the dropdown and chained albums input)
+        valid_album_ids = []
+
+        # 1. From the widget dropdown
         if album_id and album_id not in ("(none/loading)", "(none)"):
             if "(" in album_id and album_id.endswith(")"):
                 extracted_id = album_id.split("(")[-1].rstrip(")")
-                if len(extracted_id) > 10: # Validação simples de UUID
-                    album_id = extracted_id
-                    is_valid_album = True
-            elif len(album_id) > 10: # Caso seja um UUID puro
-                is_valid_album = True
+                if len(extracted_id) > 10:
+                    valid_album_ids.append(extracted_id)
+            elif len(album_id) > 10:
+                valid_album_ids.append(album_id)
+
+        # 2. From the chained albums input
+        if extra_albums is not None:
+            if isinstance(extra_albums, str):
+                if extra_albums not in valid_album_ids:
+                    valid_album_ids.append(extra_albums)
+            elif isinstance(extra_albums, list):
+                for a in extra_albums:
+                    if isinstance(a, str) and a not in valid_album_ids:
+                        valid_album_ids.append(a)
 
         results = {"uploaded": [], "local": [], "errors": []}
 
@@ -138,19 +152,69 @@ class ImmichUpload:
                 results["uploaded"].append(asset_id)
                 
                 if add_to_album_bool and asset_id:
-                    if is_valid_album:
-                        album_result = immich_api.add_to_album(album_id, asset_id)
-                        if "error" in album_result:
-                            results["errors"].append(f"Album add error: {album_result['error']}")
+                    if valid_album_ids:
+                        for val_album_id in valid_album_ids:
+                            album_result = immich_api.add_to_album(val_album_id, asset_id)
+                            if "error" in album_result:
+                                results["errors"].append(f"Album add error ({val_album_id}): {album_result['error']}")
                     else:
                         results["errors"].append("Album add error: No valid album selected.")
 
         return (images, json.dumps(results),)
 
+
+class ImmichAlbum:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "album_id": (["(none/loading)"], {"default": "(none/loading)"}),
+            },
+            "optional": {
+                "albums": ("IMMICH_ALBUMS",),
+            }
+        }
+
+    RETURN_TYPES = ("IMMICH_ALBUMS",)
+    RETURN_NAMES = ("albums",)
+    FUNCTION = "select_album"
+    CATEGORY = "FCN/immich"
+
+    @classmethod
+    def VALIDATE_INPUTS(s, album_id, **kwargs):
+        # Always return True to allow dynamically populated album IDs from the JS frontend
+        return True
+
+    def select_album(self, album_id, albums=None):
+        valid_album_ids = []
+
+        # 1. Add any previously accumulated album IDs in the pipe
+        if albums is not None:
+            if isinstance(albums, str):
+                valid_album_ids.append(albums)
+            elif isinstance(albums, list):
+                valid_album_ids.extend(albums)
+
+        # 2. Add current album_id from dropdown if it is valid and not already in the list
+        if album_id and album_id not in ("(none/loading)", "(none)"):
+            extracted_id = None
+            if "(" in album_id and album_id.endswith(")"):
+                extracted_id = album_id.split("(")[-1].rstrip(")")
+            elif len(album_id) > 10:
+                extracted_id = album_id
+
+            if extracted_id and extracted_id not in valid_album_ids:
+                valid_album_ids.append(extracted_id)
+
+        return (valid_album_ids,)
+
+
 NODE_CLASS_MAPPINGS = {
-    "immich_upload": ImmichUpload
+    "immich_upload": ImmichUpload,
+    "immich_album": ImmichAlbum
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "immich_upload": "Immich Upload (AVIF/JXL)"
+    "immich_upload": "Immich Upload (AVIF/JXL)",
+    "immich_album": "Immich Album Select / Chain"
 }
