@@ -751,7 +751,7 @@ def execute_tiled_sampling_loop(
                         # Pass sliced noise and step callback directly to sample_tile
                         sampled = sample_tile(
                             model, cropped_pos, cropped_neg, sampler_name, scheduler, steps, cfg, latent, seed, actual_denoise,
-                            callback=sampler_callback, disable_pbar=True, disable_noise=False
+                            callback=sampler_callback, disable_pbar=True, disable_noise=False, noise=tile_noise
                         )
                     finally:
                         if orig_pos_embedder_forward is not None:
@@ -790,17 +790,22 @@ def execute_tiled_sampling_loop(
                             sampled_samples = sampled_samples.reshape(B, T, C, cropped_latent.shape[-2], cropped_latent.shape[-1]).permute(0, 2, 1, 3, 4)
 
                     # Paste processed tile back to canvas using blending mask
+                    lx1_crop = crop_region_2x[0] // noise_divisor
+                    ly1_crop = crop_region_2x[1] // noise_divisor
+                    lx2_crop = crop_region_2x[2] // noise_divisor
+                    ly2_crop = crop_region_2x[3] // noise_divisor
+
                     if latent_b.ndim == 5:
                         latent_blend_mask = latent_blend_mask.view(1, 1, 1, sampled_samples.shape[-2], sampled_samples.shape[-1])
-                        latent_b[:, :, :, ly1_dst:ly2_dst, lx1_dst:lx2_dst] = (
-                            sampled_samples[:, :, :, l_core_y1:l_core_y2, l_core_x1:l_core_x2] * latent_blend_mask[:, :, :, l_core_y1:l_core_y2, l_core_x1:l_core_x2] + 
-                            latent_b[:, :, :, ly1_dst:ly2_dst, lx1_dst:lx2_dst] * (1.0 - latent_blend_mask[:, :, :, l_core_y1:l_core_y2, l_core_x1:l_core_x2])
+                        latent_b[:, :, :, ly1_crop:ly2_crop, lx1_crop:lx2_crop] = (
+                            sampled_samples * latent_blend_mask + 
+                            latent_b[:, :, :, ly1_crop:ly2_crop, lx1_crop:lx2_crop] * (1.0 - latent_blend_mask)
                         )
                     else:
                         latent_blend_mask = latent_blend_mask.view(1, 1, sampled_samples.shape[-2], sampled_samples.shape[-1])
-                        latent_b[:, :, ly1_dst:ly2_dst, lx1_dst:lx2_dst] = (
-                            sampled_samples[:, :, l_core_y1:l_core_y2, l_core_x1:l_core_x2] * latent_blend_mask[:, :, l_core_y1:l_core_y2, l_core_x1:l_core_x2] + 
-                            latent_b[:, :, ly1_dst:ly2_dst, lx1_dst:lx2_dst] * (1.0 - latent_blend_mask[:, :, l_core_y1:l_core_y2, l_core_x1:l_core_x2])
+                        latent_b[:, :, ly1_crop:ly2_crop, lx1_crop:lx2_crop] = (
+                            sampled_samples * latent_blend_mask + 
+                            latent_b[:, :, ly1_crop:ly2_crop, lx1_crop:lx2_crop] * (1.0 - latent_blend_mask)
                         )
 
                     comfy.model_management.throw_exception_if_processing_interrupted()

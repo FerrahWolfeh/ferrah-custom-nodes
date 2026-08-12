@@ -571,14 +571,15 @@ def patch_anima_rope(pos_embedder, shift_x: int, shift_y: int):
 def sample_tile(model, positive, negative, sampler_name: str, scheduler: str,
                 steps: int, cfg: float, latent: dict, seed: int, denoise: float,
                 callback=None, disable_pbar=True, disable_noise=False,
-                start_step=None, last_step=None, force_full_denoise=False) -> dict:
+                start_step=None, last_step=None, force_full_denoise=False, noise=None) -> dict:
     """Wrapper calling ComfyUI comfy.sample.sample directly for a tile with custom callback/pbar support."""
     import latent_preview
     latent_image = latent["samples"]
     latent_image = comfy.sample.fix_empty_latent_channels(model, latent_image, latent.get("downscale_ratio_spacial", None), latent.get("downscale_ratio_temporal", None))
 
-    batch_inds = latent["batch_index"] if "batch_index" in latent else None
-    noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
+    if noise is None:
+        batch_inds = latent["batch_index"] if "batch_index" in latent else None
+        noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
 
     noise_mask = None
     if "noise_mask" in latent:

@@ -63,9 +63,9 @@ async function refreshAllNodes(forceRefresh = false) {
     }
 
     const uploadNodes = app.graph.findNodesByType("immich_upload") || [];
+    const videoUploadNodes = app.graph.findNodesByType("immich_video_upload") || [];
     const albumNodes = app.graph.findNodesByType("immich_album") || [];
-    const nodes = [...uploadNodes, ...albumNodes];
-
+    const nodes = [...uploadNodes, ...videoUploadNodes, ...albumNodes];
     for (const node of nodes) {
         const albumIdWidget = node.widgets.find(w => w.name === "album_id");
         if (!albumIdWidget) continue;
@@ -113,12 +113,12 @@ async function refreshAllNodes(forceRefresh = false) {
 }
 
 /**
- * Extension for the immich_upload and immich_album nodes that fetches albums dynamically.
+ * Extension for the immich_upload, immich_video_upload and immich_album nodes that fetches albums dynamically.
  */
 app.registerExtension({
     name: "Ferrah.ImmichUpload",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name === "immich_upload" || nodeData.name === "immich_album") {
+        if (nodeData.name === "immich_upload" || nodeData.name === "immich_video_upload" || nodeData.name === "immich_album") {
 
             const onNodeCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
