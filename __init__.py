@@ -6,6 +6,13 @@ from .nodes.image_nodes import NODE_CLASS_MAPPINGS as IMAGE_NCM, NODE_DISPLAY_NA
 from .nodes.save_nodes import NODE_CLASS_MAPPINGS as SAVE_NCM, NODE_DISPLAY_NAME_MAPPINGS as SAVE_NNM
 from .nodes.anima_upscaler import NODE_CLASS_MAPPINGS as ANIMA_NCM, NODE_DISPLAY_NAME_MAPPINGS as ANIMA_NNM
 from .nodes.video_nodes import NODE_CLASS_MAPPINGS as VIDEO_NCM, NODE_DISPLAY_NAME_MAPPINGS as VIDEO_NNM
+from .core.kjnodes_patch import patch_kjnodes_preview_override
+
+# Automatically patch KJNodes ModelPreviewOverride for AMD / CPU fast MP4 previews
+try:
+    patch_kjnodes_preview_override()
+except Exception as e:
+    print(f"FerrahNodes: Note: KJNodes patch skipped ({e})")
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
